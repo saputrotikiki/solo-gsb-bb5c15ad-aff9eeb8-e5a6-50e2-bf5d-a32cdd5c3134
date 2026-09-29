@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    image: stage-command-sandbox
+    container_name: stage-command-sandbox
+    ports:
+      - "8080:8080"
+    volumes:
+      - sandbox-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  sandbox-data:
