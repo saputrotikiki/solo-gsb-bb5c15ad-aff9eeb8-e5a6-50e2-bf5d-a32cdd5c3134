@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { loadProject, saveProject } from './api';
+import { SaveQueue } from './saveQueue';
 import { BulkImportDialog } from './BulkImportDialog';
 import { CrewPanel } from './CrewPanel';
 import { GraphCanvas, Selection } from './GraphCanvas';
@@ -176,29 +177,32 @@ export default function App() {
     return out;
   }, [project, sim.replanStarts, effectiveSchedule]);
 
-  // 本地持久化（防抖）
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const persist = useCallback((p: Project) => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    setSaveState('saving');
-    saveTimer.current = setTimeout(() => {
-      saveProject(p)
-        .then(() => setSaveState('saved'))
-        .catch(() => setSaveState('error'));
-    }, 400);
-  }, []);
+  // projectRef：在状态更新函数外读取最新完整项目（生成新 ID、入队保存均需如此，
+  // 避免 StrictMode 下 updater 重复执行带来的副作用）
+  const projectRef = useRef<Project | null>(null);
+  projectRef.current = project;
 
-  const update = useCallback(
-    (fn: (p: Project) => Project) => {
-      setProject((prev) => {
-        if (!prev) return prev;
-        const next = fn(prev);
-        persist(next);
-        return next;
-      });
-    },
-    [persist],
-  );
+  // 本地持久化：防抖 + 串行保存链（最新版本确认前一直“保存中”，失败保留待保存内容可重试）
+  const saveQueueRef = useRef<SaveQueue | null>(null);
+  if (!saveQueueRef.current) {
+    saveQueueRef.current = new SaveQueue({
+      save: saveProject,
+      onStatusChange: setSaveState,
+    });
+  }
+  useEffect(() => () => saveQueueRef.current?.dispose(), []);
+
+  const update = useCallback((fn: (p: Project) => Project) => {
+    // 在 updater 外读取当前项目并入队：既避免 StrictMode 下重复触发保存，
+    // 也保证保存链拿到的是本次编辑后的完整快照
+    const prev = projectRef.current;
+    if (!prev) return;
+    const next = fn(prev);
+    if (next === prev) return;
+    projectRef.current = next;
+    setProject(next);
+    saveQueueRef.current?.enqueue(next);
+  }, []);
 
   const addNode = useCallback(() => {
     const id = crypto.randomUUID();
@@ -323,9 +327,6 @@ export default function App() {
   const [placingSnippetId, setPlacingSnippetId] = useState<string | null>(null);
 
   // 片段落放 / 保存需要在状态更新函数外生成新 ID（StrictMode 下更新函数可能重复执行）
-  const projectRef = useRef<Project | null>(null);
-  projectRef.current = project;
-
   const saveSnippet = useCallback(
     (rootId: string, name: string) => {
       const current = projectRef.current;
@@ -502,6 +503,15 @@ export default function App() {
         <span className={`save-state ${saveState}`}>
           {saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中…' : '保存失败'}
         </span>
+        {saveState === 'error' && (
+          <button
+            className="save-retry"
+            title="保存失败：待保存内容已保留，点击重试保存最新内容"
+            onClick={() => saveQueueRef.current?.retry()}
+          >
+            重试保存
+          </button>
+        )}
       </header>
 
       {cycle && (

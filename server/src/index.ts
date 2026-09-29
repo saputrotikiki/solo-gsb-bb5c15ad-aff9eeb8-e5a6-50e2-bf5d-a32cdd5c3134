@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { atomicWriteFile, cleanupStaleTempFiles } from './persistence';
 
 interface CommandNode {
   id: string;
@@ -211,22 +212,17 @@ app.put('/api/project', (req: Request, res: Response) => {
     res.status(400).json({ error: 'invalid project payload' });
     return;
   }
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFile(tmp, JSON.stringify(req.body, null, 2), 'utf-8', (err) => {
-    if (err) {
-      console.error('[server] write failed:', err.message);
-      res.status(500).json({ error: 'failed to save project' });
-      return;
-    }
-    fs.rename(tmp, DATA_FILE, (renameErr) => {
-      if (renameErr) {
-        console.error('[server] rename failed:', renameErr.message);
-        res.status(500).json({ error: 'failed to save project' });
-        return;
-      }
+  const payload = JSON.stringify(req.body, null, 2);
+  // 每个请求使用各自的专属临时文件并经 per-file 队列串行落盘：
+  // 并发保存时互不借用临时内容，且仅在本次写入 rename 完成后才回复成功。
+  atomicWriteFile(DATA_FILE, payload)
+    .then(() => {
       res.json({ ok: true, savedAt: new Date().toISOString() });
+    })
+    .catch((err: unknown) => {
+      console.error('[server] save failed:', err instanceof Error ? err.message : err);
+      if (!res.headersSent) res.status(500).json({ error: 'failed to save project' });
     });
-  });
 });
 
 app.get('/api/health', (_req: Request, res: Response) => {
@@ -244,6 +240,8 @@ app.use((_req: Request, res: Response) => {
 });
 
 ensureDataFile();
+// 清理异常退出后残留的临时文件（早期版本的共用 .tmp 及本版本的专属 .tmp.*）
+cleanupStaleTempFiles(DATA_FILE);
 app.listen(PORT, () => {
   console.log(`[server] stage command sandbox listening on http://0.0.0.0:${PORT}`);
   console.log(`[server] data file: ${DATA_FILE}`);

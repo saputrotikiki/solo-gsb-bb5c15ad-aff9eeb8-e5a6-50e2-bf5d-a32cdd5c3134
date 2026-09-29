@@ -59,8 +59,10 @@ html, body, #root {
   min-width: 90px;
 }
 
-.save-state { color: var(--muted); font-size: 12px; }
+.save-state { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.save-state.saving { color: var(--amber); }
 .save-state.error { color: var(--red); }
+.save-retry { padding: 3px 10px; font-size: 12px; }
 
 /* ---------- 开场截止控件 ---------- */
 .deadline-toggle {
