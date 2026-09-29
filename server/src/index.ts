@@ -211,16 +211,21 @@ app.put('/api/project', (req: Request, res: Response) => {
     res.status(400).json({ error: 'invalid project payload' });
     return;
   }
-  const tmp = DATA_FILE + '.tmp';
+  // 每次请求使用独立的临时文件：并发写入各自落盘，不共用 / 借用同一份临时内容；
+  // 各自写入成功后原子 rename 覆盖，最终落盘的是最后一次成功写入的完整项目。
+  const tmp = `${DATA_FILE}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}`;
+  const cleanup = () => fs.rm(tmp, { force: true }, () => {});
   fs.writeFile(tmp, JSON.stringify(req.body, null, 2), 'utf-8', (err) => {
     if (err) {
       console.error('[server] write failed:', err.message);
+      cleanup();
       res.status(500).json({ error: 'failed to save project' });
       return;
     }
     fs.rename(tmp, DATA_FILE, (renameErr) => {
       if (renameErr) {
         console.error('[server] rename failed:', renameErr.message);
+        cleanup();
         res.status(500).json({ error: 'failed to save project' });
         return;
       }

@@ -176,26 +176,88 @@ export default function App() {
     return out;
   }, [project, sim.replanStarts, effectiveSchedule]);
 
-  // 本地持久化（防抖）
+  // ---- 保存链（防抖 + 单请求在途 + 最新版本为准）----
+  // 待保存的最新项目快照：编辑只更新此引用；保存成功且期间无更新才清空，
+  // 保存失败时保留（引用比较即可判断是否有更新的编辑），供重试或自动续存。
+  const pendingProjectRef = useRef<Project | null>(null);
+  // 是否有保存请求在途：同一时刻只允许一个请求独立完成落盘，
+  // 避免旧请求后返回时把状态错误地置为「已保存」，并保证最后一次编辑最后落盘。
+  const saveInFlightRef = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const persist = useCallback((p: Project) => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
+  // 片段落放 / 保存需要在状态更新函数外取最新项目（StrictMode 下更新函数可能重复执行）
+  const projectRef = useRef<Project | null>(null);
+
+  /**
+   * 保存泵：同一时刻只跑一个保存请求，每次取最新待保存快照独立落盘。
+   * - 成功后若期间没有更新编辑（引用未变）才置「已保存」；否则立即续存最新快照（仍显示「保存中」）。
+   * - 失败后若期间没有更新编辑，置「保存失败」并保留待保存内容（可点击重试）；否则续存最新快照。
+   */
+  const pumpSave = useCallback(async () => {
+    if (saveInFlightRef.current) return;
+    const snapshot = pendingProjectRef.current;
+    if (!snapshot) return;
+    saveInFlightRef.current = true;
     setSaveState('saving');
-    saveTimer.current = setTimeout(() => {
-      saveProject(p)
-        .then(() => setSaveState('saved'))
-        .catch(() => setSaveState('error'));
-    }, 400);
+    let continueWithNewer = false;
+    try {
+      await saveProject(snapshot);
+      if (pendingProjectRef.current === snapshot) {
+        // 期间无更新编辑：本次即最新版本，已成功落盘并收到确认
+        pendingProjectRef.current = null;
+        setSaveState('saved');
+      } else {
+        // 期间又有编辑：旧请求的成功不作为「已保存」，续存最新快照
+        continueWithNewer = true;
+      }
+    } catch {
+      if (pendingProjectRef.current === snapshot) {
+        // 最新版本失败：保留待保存内容，等待重试（不切回「已保存」）
+        setSaveState('error');
+      } else {
+        // 期间又有编辑：续存最新快照
+        continueWithNewer = true;
+      }
+    } finally {
+      saveInFlightRef.current = false;
+    }
+    if (continueWithNewer) {
+      void pumpSave();
+    }
   }, []);
+
+  /** 编辑后安排保存：记录最新快照并置「保存中」；防抖 400ms 后落盘。已有请求在途时由其完成后续存。 */
+  const persist = useCallback(
+    (next: Project) => {
+      pendingProjectRef.current = next;
+      setSaveState('saving');
+      if (saveInFlightRef.current) return; // 在途请求完成后会自动续存最新快照
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => {
+        saveTimer.current = null;
+        void pumpSave();
+      }, 400);
+    },
+    [pumpSave],
+  );
+
+  /** 保存失败后手动重试（之后新的编辑也会自动触发续存）。 */
+  const retrySave = useCallback(() => {
+    if (saveInFlightRef.current) return;
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    void pumpSave();
+  }, [pumpSave]);
 
   const update = useCallback(
     (fn: (p: Project) => Project) => {
-      setProject((prev) => {
-        if (!prev) return prev;
-        const next = fn(prev);
-        persist(next);
-        return next;
-      });
+      const prev = projectRef.current;
+      if (!prev) return;
+      const next = fn(prev);
+      projectRef.current = next;
+      setProject(next);
+      persist(next);
     },
     [persist],
   );
@@ -322,8 +384,7 @@ export default function App() {
   // 当前处于“放置模式”的片段 id（选中片段后点击画布空白处放置）
   const [placingSnippetId, setPlacingSnippetId] = useState<string | null>(null);
 
-  // 片段落放 / 保存需要在状态更新函数外生成新 ID（StrictMode 下更新函数可能重复执行）
-  const projectRef = useRef<Project | null>(null);
+  // projectRef 声明于上方保存链区域；此处随渲染同步最新项目，供状态更新函数外的逻辑取最新值
   projectRef.current = project;
 
   const saveSnippet = useCallback(
@@ -499,9 +560,20 @@ export default function App() {
           <span className="deadline-unit">人</span>
         </label>
         <span className="spacer" />
-        <span className={`save-state ${saveState}`}>
-          {saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中…' : '保存失败'}
-        </span>
+        <button
+          type="button"
+          className={`save-state save-state-${saveState}`}
+          onClick={saveState === 'error' ? retrySave : undefined}
+          title={
+            saveState === 'saved'
+              ? '所有修改已保存到服务器'
+              : saveState === 'saving'
+                ? '正在把最新修改写入服务器；最新版本落盘并收到确认前不会显示「已保存」'
+                : '保存失败：点击重试，待保存内容不会丢失'
+          }
+        >
+          {saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中…' : '保存失败（点击重试）'}
+        </button>
       </header>
 
       {cycle && (

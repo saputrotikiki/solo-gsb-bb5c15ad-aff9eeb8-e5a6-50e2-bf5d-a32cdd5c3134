@@ -59,8 +59,16 @@ html, body, #root {
   min-width: 90px;
 }
 
-.save-state { color: var(--muted); font-size: 12px; }
-.save-state.error { color: var(--red); }
+.save-state {
+  color: var(--muted);
+  font-size: 12px;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+}
+.save-state-error { color: var(--red); cursor: pointer; }
+.save-state-error:hover { text-decoration: underline; }
 
 /* ---------- 开场截止控件 ---------- */
 .deadline-toggle {
